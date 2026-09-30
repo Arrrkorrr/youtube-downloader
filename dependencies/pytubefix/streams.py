@@ -330,7 +330,6 @@ class Stream:
         max_retries: int = 0,
         interrupt_checker: Optional[Callable[[], bool]] = None
     ) -> Optional[str]:
-
         """
         Downloads a file from the URL provided by `self.url` and saves it locally with optional configurations.
 
@@ -362,7 +361,7 @@ class Stream:
         elif kernel == "darwin":
             file_system = "APFS"
         else:
-            file_system = "NTFS"  
+            file_system = "NTFS"
 
         translation_table = file_system_verify(file_system)
 

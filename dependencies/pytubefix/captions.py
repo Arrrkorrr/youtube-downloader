@@ -77,7 +77,7 @@ class Caption:
                re.search('^[0-9]{2}:[0-9]{2}:[0-9]{2}', line) is None and \
                re.search('^$', line) is None:
                 text += ' ' + line.strip()
-            text = text.lstrip()  
+            text = text.lstrip()
         return text.strip()
 
     def save_captions(self, filename: str):

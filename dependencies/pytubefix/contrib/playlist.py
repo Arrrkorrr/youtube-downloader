@@ -168,6 +168,7 @@ class Playlist(Sequence):
         videos_urls, continuation = self._extract_videos(
             json.dumps(extract.initial_data(initial_html)), context
         )
+        seen_urls = list(videos_urls)
         if until_watch_id:
             try:
                 trim_index = videos_urls.index(f"/watch?v={until_watch_id}")
@@ -176,6 +177,24 @@ class Playlist(Sequence):
             except ValueError:
                 pass
         yield videos_urls
+
+        if (
+                seen_urls
+                and isinstance(seen_urls[0], str)
+                and len(uniqueify(seen_urls)) >= 100
+        ):
+            extra_urls = self._extract_watch_panel_video_urls(seen_urls[0])
+            unseen_urls = [url for url in extra_urls if url not in seen_urls]
+            if unseen_urls:
+                if until_watch_id:
+                    try:
+                        trim_index = unseen_urls.index(f"/watch?v={until_watch_id}")
+                        yield unseen_urls[:trim_index]
+                        return
+                    except ValueError:
+                        pass
+                yield unseen_urls
+                return
 
         # Extraction from a playlist only returns 100 videos at a time
         # if self._extract_videos returns a continuation there are more
@@ -189,6 +208,7 @@ class Playlist(Sequence):
             # extract up to 100 songs from the page loaded
             # returns another continuation if more videos are available
             videos_urls, continuation = self._extract_videos(req, context)
+            seen_urls.extend(videos_urls)
             if until_watch_id:
                 try:
                     trim_index = videos_urls.index(f"/watch?v={until_watch_id}")
@@ -197,6 +217,87 @@ class Playlist(Sequence):
                 except ValueError:
                     pass
             yield videos_urls
+
+        if (
+                seen_urls
+                and isinstance(seen_urls[0], str)
+                and len(uniqueify(seen_urls)) >= 200
+        ):
+            extra_urls = self._extract_watch_panel_video_urls(seen_urls[0])
+            unseen_urls = [url for url in extra_urls if url not in seen_urls]
+            if until_watch_id:
+                try:
+                    trim_index = unseen_urls.index(f"/watch?v={until_watch_id}")
+                    yield unseen_urls[:trim_index]
+                    return
+                except ValueError:
+                    pass
+            if unseen_urls:
+                yield unseen_urls
+
+    def _extract_watch_panel_video_urls(self, seed_watch_url: str) -> List[str]:
+        """Extract long playlists from the watch-page playlist panel.
+
+        YouTube's playlist browse endpoint can stop returning continuation
+        tokens after 200 lockupViewModel items. The watch next endpoint still
+        exposes wider playlist-panel windows when seeded with later videos.
+        """
+        try:
+            selected_video_id = seed_watch_url.split("v=", 1)[1].split("&", 1)[0]
+        except IndexError:
+            return []
+
+        collected_ids = []
+        selected_ids = set()
+        for _ in range(30):
+            if not selected_video_id or selected_video_id in selected_ids:
+                break
+            selected_ids.add(selected_video_id)
+
+            client = InnerTube('WEB')
+            client.base_data.update({
+                "videoId": selected_video_id,
+                "playlistId": self.playlist_id,
+                "contentCheckOk": True,
+                "racyCheckOk": True,
+            })
+            response = client._call_api(
+                f"{client.base_url}/next",
+                client.base_params,
+                client.base_data
+            )
+            panel_ids = self._extract_playlist_panel_video_ids(response)
+            if not panel_ids:
+                break
+
+            previous_count = len(collected_ids)
+            collected_ids = uniqueify(collected_ids + panel_ids)
+            if len(collected_ids) == previous_count:
+                break
+
+            selected_video_id = collected_ids[max(0, len(collected_ids) - 101)]
+
+        return [f"/watch?v={video_id}" for video_id in collected_ids]
+
+    def _extract_playlist_panel_video_ids(self, raw_json: Dict) -> List[str]:
+        """Extract video ids from watch-page playlistPanelVideoRenderer items."""
+        video_ids = []
+        for renderer in self._find_dict_values(raw_json, 'playlistPanelVideoRenderer'):
+            if isinstance(renderer, dict) and renderer.get('videoId'):
+                video_ids.append(renderer['videoId'])
+        return uniqueify(video_ids)
+
+    def _find_dict_values(self, data: Any, key: str) -> Iterable[Any]:
+        """Yield values for a key from a nested dict/list response."""
+        stack = [data]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                if key in current:
+                    yield current[key]
+                stack.extend(reversed(list(current.values())))
+            elif isinstance(current, list):
+                stack.extend(reversed(current))
 
     def _extract_videos(self, raw_json: str, context: Optional[Any] = None) -> Tuple[List[str], Optional[str]]:
         """Extracts videos from a raw json page
@@ -220,10 +321,14 @@ class Playlist(Sequence):
                 "tabs"][0]["tabRenderer"]["content"][
                 "sectionListRenderer"]["contents"]
             try:
-                renderer = section_contents[0]["itemSectionRenderer"]["contents"][0]
+                item_section_contents = section_contents[0]["itemSectionRenderer"]["contents"]
+                renderer = item_section_contents[0]
 
                 if 'richGridRenderer' in renderer:
                     important_content = renderer["richGridRenderer"]
+                elif 'lockupViewModel' in renderer:
+                    videos = list(item_section_contents)
+                    important_content = None
                 else:
                     important_content = renderer["playlistVideoListRenderer"]
 
@@ -232,10 +337,14 @@ class Playlist(Sequence):
                 important_content = section_contents[
                     1]["itemSectionRenderer"][
                     "contents"][0]["playlistVideoListRenderer"]
-            videos = important_content["contents"]
+            if important_content is not None:
+                videos = important_content["contents"]
 
-            self._visitor_data = initial_data["responseContext"]["webResponseContextExtensionData"][
-                "ytConfigData"]["visitorData"]
+            try:
+                self._visitor_data = initial_data["responseContext"]["webResponseContextExtensionData"][
+                    "ytConfigData"]["visitorData"]
+            except (KeyError, TypeError):
+                pass
         except (KeyError, IndexError, TypeError):
             try:
                 # this is the json tree structure, if the json was directly sent
@@ -243,7 +352,12 @@ class Playlist(Sequence):
                 # no longer a list and no longer has the "response" key
                 important_content = initial_data['onResponseReceivedActions'][0][
                     'appendContinuationItemsAction']['continuationItems']
-                videos = important_content
+                videos = []
+                for item in important_content:
+                    if 'itemSectionRenderer' in item:
+                        videos.extend(item['itemSectionRenderer'].get('contents', []))
+                    else:
+                        videos.append(item)
             except (KeyError, IndexError, TypeError) as p:
                 logger.info(p)
                 return [], None
@@ -253,11 +367,17 @@ class Playlist(Sequence):
             # token provided by the API doesn't seem to work even in the official player
             try:
                 continuation = videos[-1]['continuationItemRenderer']['continuationEndpoint']['continuationCommand']['token']
-            except:
-                for command in videos[-1]['continuationItemRenderer']['continuationEndpoint']['commandExecutorCommand']['commands']:
-                    if 'continuationCommand' in command:
-                        continuation = command['continuationCommand']['token']
-                        break
+            except (KeyError, IndexError, TypeError):
+                try:
+                    continuation = videos[-1]['continuationItemViewModel'][
+                        'continuationCommand']['innertubeCommand'][
+                        'continuationCommand']['token']
+                except (KeyError, IndexError, TypeError):
+                    for command in videos[-1]['continuationItemRenderer'][
+                        'continuationEndpoint']['commandExecutorCommand']['commands']:
+                        if 'continuationCommand' in command:
+                            continuation = command['continuationCommand']['token']
+                            break
             videos = videos[:-1]
         except (KeyError, IndexError):
             # if there is an error, no continuation is available
@@ -275,7 +395,9 @@ class Playlist(Sequence):
         """
         items_obj = []
         for x in items:
-            items_obj.append(self._extract_video_id(x))
+            extracted_item = self._extract_video_id(x)
+            if extracted_item:
+                items_obj.append(extracted_item)
         return items_obj
 
     def _extract_video_id(self, x: dict):
@@ -286,7 +408,23 @@ class Playlist(Sequence):
         try:
             return f"/watch?v={x['playlistVideoRenderer']['videoId']}"
         except (KeyError, IndexError, TypeError):
-            return self._extract_shorts_id(x)
+            try:
+                return self._extract_lockup_video_id(x)
+            except (KeyError, IndexError, TypeError):
+                return self._extract_shorts_id(x)
+
+    def _extract_lockup_video_id(self, x: dict):
+        """Try extracting video ids from YouTube's lockupViewModel playlist items."""
+        lockup = x['lockupViewModel']
+        if lockup.get('contentType') != 'LOCKUP_CONTENT_TYPE_VIDEO':
+            return []
+
+        video_id = lockup.get('contentId')
+        if not video_id:
+            video_id = lockup['rendererContext']['commandContext']['onTap'][
+                'innertubeCommand']['watchEndpoint']['videoId']
+
+        return f"/watch?v={video_id}"
 
     def _extract_shorts_id(self, x: dict):
         """ Try extracting shorts ids.

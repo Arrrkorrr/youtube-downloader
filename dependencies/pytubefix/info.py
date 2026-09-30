@@ -10,12 +10,12 @@ def info() -> dict:
     """
     Returns information about the current operating system, Python version, and Pytubefix version.
 
-    This function gathers system-related information such as the operating system, Python version, 
+    This function gathers system-related information such as the operating system, Python version,
     and the version of the Pytubefix library, and returns it in a dictionary format.
 
-    This can be useful for debugging or logging purposes, as it allows developers to quickly 
-    check the environment in which the code is being executed. It helps ensure that the correct 
-    versions of Python and Pytubefix are being used, and can also assist in identifying any 
+    This can be useful for debugging or logging purposes, as it allows developers to quickly
+    check the environment in which the code is being executed. It helps ensure that the correct
+    versions of Python and Pytubefix are being used, and can also assist in identifying any
     compatibility issues between the system and the application.
 
     Returns:
